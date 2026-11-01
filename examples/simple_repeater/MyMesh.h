@@ -37,6 +37,7 @@
 #include <helpers/RoutingPolicy.h>
 #include <helpers/TimeSyncHelper.h>
 #include "RateLimiter.h"
+#include <helpers/BlacklistMatch.h>
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -101,6 +102,10 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   unsigned long pending_discover_until;
   bool region_load_active;
   unsigned long dirty_contacts_expiry;
+  BlacklistEntry _path_blacklist[MAX_BLACKLIST_ENTRIES];
+  BlacklistEntry _chan_blacklist[MAX_BLACKLIST_ENTRIES];
+  ChanNameFilter _chan_name_filters[MAX_CHAN_NAME_FILTERS];
+  int _num_chan_name_filters;
 #if MAX_NEIGHBOURS
   NeighbourInfo neighbours[MAX_NEIGHBOURS];
 #endif
@@ -140,7 +145,20 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   mesh::Packet* createSelfAdvert();
 
   File openAppend(const char* fname);
+  File openForWrite(const char* fname);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
+
+  bool isChanBlacklisted(const mesh::Packet* packet) const;
+  void loadBlacklist(const char* fname, BlacklistEntry* list);
+  bool saveBlacklist(const char* fname, const BlacklistEntry* list);
+  bool addToBlacklist(BlacklistEntry* list, const uint8_t* prefix, uint8_t len);
+  bool removeFromBlacklist(BlacklistEntry* list, const uint8_t* prefix, uint8_t len);
+  void formatBlacklist(const BlacklistEntry* list, char* reply);
+  bool addChanNameFilter(const char* name);
+  bool removeChanNameFilter(const char* name);
+  void loadChanBlacklist(const char* fname);
+  bool saveChanBlacklist(const char* fname);
+  void formatChanBlacklist(char* reply);
 
 protected:
   float getAirtimeBudgetFactor() const override {
@@ -179,6 +197,7 @@ protected:
 #endif
 
   mesh::DispatcherAction onRecvPacket(mesh::Packet* pkt) override;
+  bool filterRecvFloodPacket(mesh::Packet* pkt) override;
 
   void onAnonDataRecv(mesh::Packet* packet, const uint8_t* secret, const mesh::Identity& sender, uint8_t* data, size_t len) override;
   int searchPeersByHash(const uint8_t* hash) override;
