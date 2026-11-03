@@ -28,6 +28,18 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
   MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
 #endif
 
+#if defined(UI_HAS_ROTARY_INPUT)
+  #include "ScoutRotaryInput.h"
+  static ScoutRotaryInput rotaryInputImpl(PIN_ENCODER_A, PIN_ENCODER_B);
+  RotaryInput& rotary_input = rotaryInputImpl;
+#endif
+
+#if defined(UI_HAS_STATUS_LEDS)
+  #include "ScoutStatusLeds.h"
+  static ScoutStatusLeds statusLedsImpl(PIN_STATUS_LEDS, STATUS_LEDS_COUNT);
+  StatusLeds& status_leds = statusLedsImpl;
+#endif
+
 bool radio_init() {
   fallback_clock.begin();
   rtc_clock.begin(Wire);

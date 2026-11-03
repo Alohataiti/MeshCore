@@ -1575,8 +1575,13 @@ public:
     if (_page == HomePage::SETTINGS && _in_settings) {
       int total_n = settingsPageItemCount(_settings_page);
 
+#ifdef UI_ENCODER_NAV
+      if (c == KEY_PREV) c = KEY_UP;
+      if (c == KEY_CANCEL) {
+#else
       // ● long (KEY_CANCEL) or KEY_PREV = exit subpage or settings
       if (c == KEY_CANCEL || c == KEY_PREV) {
+#endif
         if (_settings_page == SettingsPage::CODECS) {
           _settings_page = SettingsPage::SYSTEM;
           _settings_sel = 4;
@@ -2055,6 +2060,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #endif
 
   _node_prefs = node_prefs;
+#ifdef UI_HAS_STATUS_LEDS
+  status_leds.begin();
+  applyLedPrefs();
+#endif
   if (_node_prefs != NULL) {
     setClockDimMode(_node_prefs->ui_clock_dim_mode);
   }
@@ -2201,6 +2210,9 @@ void UITask::onControlDataRecv(const mesh::Packet* packet) {
 
 void UITask::onQueueSizeChanged(int msgcount) {
   _msgcount = msgcount;
+#ifdef UI_HAS_STATUS_LEDS
+  _led_unread.queueChanged(msgcount, getUnreadMsgCount());
+#endif
   if (msgcount != 0) return;
   // Queue emptied (the app has taken the messages). A preview that has only just
   // come up stays until the MSG HOLD time after the message arrived, unless the
@@ -2222,6 +2234,9 @@ void UITask::onShowMessage(uint8_t path_len, const char* from_name, const char* 
   bool on_clock = (curr == home) && ((HomeScreen*)home)->isOnClockPage();
 
   ((MsgPreviewScreen*)msg_preview)->addPreview(path_len, from_name, text, is_pm);
+#ifdef UI_HAS_STATUS_LEDS
+  _led_unread.arrived();   // also covers a full unread buffer
+#endif
 
   if (on_clock) {
     int pm_mode = ((HomeScreen*)home)->getPmClockMode();
@@ -2395,6 +2410,18 @@ void UITask::loop() {
   if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
     c = handleTripleClick(KEY_SELECT);
   }
+#elif defined(PIN_USER_BTN) && defined(UI_ENCODER_NAV)
+  // encoder press: short = enter, long / double = back; turning scrolls (see rotary below)
+  int ev = user_btn.check();
+  if (ev == BUTTON_EVENT_CLICK) {
+    c = checkDisplayOn(KEY_ENTER);
+  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+    c = handleLongPress(KEY_CANCEL);
+  } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
+    c = handleDoubleClick(KEY_CANCEL);
+  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+    c = handleTripleClick(KEY_SELECT);
+  }
 #elif defined(PIN_USER_BTN)
   int ev = user_btn.check();
   #ifdef UI_HAS_NAV_INPUT
@@ -2421,6 +2448,13 @@ void UITask::loop() {
 #endif
 #if defined(UI_HAS_ROTARY_INPUT)
   RotaryInputEvent rotaryEv = rotary_input.poll();
+#ifdef UI_ENCODER_NAV
+  // turning the encoder while the screen is off wakes it (the step itself is consumed)
+  if (c == 0 && rotaryEv != RotaryInputEvent::None && _display != NULL && !_display->isOn()) {
+    checkDisplayOn(KEY_NEXT);
+    rotaryEv = RotaryInputEvent::None;
+  }
+#endif
   if (c == 0 && _display != NULL && _display->isOn()) {
     if (rotaryEv == RotaryInputEvent::Next) {
       c = KEY_NEXT;
@@ -2457,12 +2491,31 @@ void UITask::loop() {
 #endif
 
   if (c != 0 && curr) {
+#ifdef UI_HAS_STATUS_LEDS
+    if (curr == msg_preview) _led_unread.read(getUnreadMsgCount());
+#endif
     curr->handleInput(c);
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
     _next_refresh = 100;  // trigger refresh
   }
 
   userLedHandler();
+#ifdef UI_HAS_STATUS_LEDS
+  StatusLedState leds_now;
+  #ifdef SX126X_TXEN
+  leds_now.tx = digitalRead(SX126X_TXEN) == HIGH;   // RadioLib drives it HIGH while transmitting
+  #else
+  leds_now.tx = false;
+  #endif
+  leds_now.rx_count = radio_driver.getPacketsRecv();
+  // breathe only for messages the user has not acted on yet; the screen alone waking
+  // up for a message does not count as seen (the node may be on a belt)
+  leds_now.unread = _led_unread.sample(getUnreadMsgCount());
+  LocationProvider* loc = sensors.getLocationProvider();
+  leds_now.gps_on = loc != NULL && getGPSState();
+  leds_now.gps_fix = leds_now.gps_on && loc->isValid();
+  status_leds.update(leds_now);
+#endif
 
 #ifdef PIN_BUZZER
   if (buzzer.isPlaying())  buzzer.loop();
@@ -2529,6 +2582,14 @@ void UITask::loop() {
     shutdown();
   }
 }
+
+#ifdef UI_HAS_STATUS_LEDS
+void UITask::applyLedPrefs() {
+  if (_node_prefs) {
+    status_leds.configure(_node_prefs->ui_led_enabled, _node_prefs->ui_led_msg_enabled, _node_prefs->ui_led_level);
+  }
+}
+#endif
 
 char UITask::checkDisplayOn(char c) {
   if (_display != NULL) {

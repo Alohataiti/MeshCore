@@ -1,4 +1,7 @@
 #pragma once
+#ifdef UI_HAS_STATUS_LEDS
+#include <helpers/ui/UnreadLedLatch.h>
+#endif
 
 #include <MeshCore.h>
 #include <helpers/ui/DisplayDriver.h>
@@ -50,6 +53,9 @@ class UITask : public AbstractUITask {
   char _alert[80];
   unsigned long _alert_expiry;
   int _msgcount;
+#ifdef UI_HAS_STATUS_LEDS
+  UnreadLedLatch _led_unread;
+#endif
   unsigned long ui_started_at;
   bool _low_battery_off = false; // shutdown() was called for a flat battery
   int next_backlight_btn_check = 0;
@@ -134,6 +140,9 @@ public:
   }
 
   void toggleBuzzer();
+#ifdef UI_HAS_STATUS_LEDS
+  void applyLedPrefs();   // push LED on/off/brightness from prefs to the status LEDs
+#endif
   bool getGPSState();
   void toggleGPS();
 

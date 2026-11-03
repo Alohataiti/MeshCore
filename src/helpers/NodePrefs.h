@@ -177,6 +177,11 @@ public:
   // use ssid from prefs, or fallback to ssid from build flags
   const char* getWifiSSID() const { return wifi_ssid[0] ? wifi_ssid : WIFI_SSID; }
 #endif
+#ifdef UI_HAS_STATUS_LEDS
+  uint8_t  ui_led_enabled = 1;       // status LEDs on/off (boards with UI_HAS_STATUS_LEDS)
+  uint8_t  ui_led_msg_enabled = 1;   // unread-message breathing on the status LEDs
+  uint8_t  ui_led_level = 1;         // status LED brightness step, 0 = dimmest
+#endif
 
 private:
   class RadioPrefs : public CommonRadioPrefs {
@@ -355,6 +360,11 @@ private:
       def("framed_pkt", _parent->framed_packets_enabled);
       def("lang", _parent->ui_lang);
       def("ble_prefix", _parent->ui_ble_prefix);
+#ifdef UI_HAS_STATUS_LEDS
+      def("led", _parent->ui_led_enabled);
+      def("led_msg", _parent->ui_led_msg_enabled);
+      def("led_lvl", _parent->ui_led_level);
+#endif
     }
   public:
     UIPrefs(NodePrefs* parent) : _parent(parent) { }
