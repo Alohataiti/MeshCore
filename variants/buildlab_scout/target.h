@@ -24,6 +24,12 @@
   #include <helpers/ui/SSD1306Display.h>
   #include <helpers/ui/MomentaryButton.h>
 #endif
+#if defined(UI_HAS_ROTARY_INPUT)
+  #include <helpers/ui/RotaryInput.h>
+#endif
+#if defined(UI_HAS_STATUS_LEDS)
+  #include <helpers/ui/StatusLeds.h>
+#endif
 
 extern BuildLabScoutBoard board;
 extern WRAPPER_CLASS radio_driver;
@@ -33,6 +39,12 @@ extern EnvironmentSensorManager sensors;
 #ifdef DISPLAY_CLASS
   extern DISPLAY_CLASS display;
   extern MomentaryButton user_btn;
+#endif
+#if defined(UI_HAS_ROTARY_INPUT)
+  extern RotaryInput& rotary_input;
+#endif
+#if defined(UI_HAS_STATUS_LEDS)
+  extern StatusLeds& status_leds;
 #endif
 
 bool radio_init();
