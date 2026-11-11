@@ -6,6 +6,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 - [Operational](#operational)
 - [Neighbors](#neighbors-repeater-only)
+- [Blacklist](#blacklist-repeater-only)
 - [Statistics](#statistics)
 - [Logging](#logging)
 - [Information](#info)
@@ -1217,3 +1218,40 @@ Ethernet support is available on RAK4631 boards with a RAK13800 (W5100S) Etherne
 - Connect with any TCP client (e.g. `nc`, PuTTY) to access the same CLI available over serial.
 
 ---
+
+
+## Blacklist (repeater only)
+
+The lists are empty by default. Local serial CLI and authenticated admin CLI can manage them:
+
+| Command | Action |
+| --- | --- |
+| `blacklist path list` | List blocked node prefixes |
+| `blacklist path add 81AB,123456` | Add 1-4 byte hexadecimal prefixes |
+| `blacklist path rem 81AB` | Remove a prefix |
+| `blacklist path clear` | Clear the path list |
+| `blacklist chan list` | List blocked channel hashes and names |
+| `blacklist chan add 81,#example` | Add a one-byte channel hash or public `#name` |
+| `blacklist chan rem #example` | Remove a channel rule |
+| `blacklist chan clear` | Clear the channel list |
+| `help blacklist` | Show the command syntax |
+
+Each path list and channel-hash list holds up to 16 entries. Up to 8 channel names
+can be stored, each at most 31 bytes including `#`. Names cannot contain spaces or
+commas. A command accepts up to 16 comma-separated entries. Mixed valid and invalid
+entries return `OK (partial)` when only some changes succeed.
+
+Filtering applies to received flood packets, including scoped floods. Direct packets
+are unaffected. A path prefix matches an individual hop only when the hop contains
+at least that many bytes; a two-byte rule is not shortened to match a one-byte hop.
+Advertiser public-key prefixes are checked separately because the originator is not
+in its own path. A four-byte path rule therefore matches adverts only.
+
+A channel hash is only one byte, so a hex rule blocks every group-text or group-data
+channel sharing that byte. A `#name` rule derives the public channel key and verifies
+the packet MAC as well as its hash. Private channels must be filtered by their hash.
+
+Changes are saved automatically in `/path_bl` and `/chan_bl` and loaded at startup.
+A storage error is reported if writing fails; the changed RAM list remains active
+until reboot. These files use newline-separated hex prefixes or channel names.
+List replies end with `...` when the entries do not fit in one CLI reply.

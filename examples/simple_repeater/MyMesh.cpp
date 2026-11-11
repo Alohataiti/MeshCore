@@ -46,6 +46,9 @@
 
 #define FIRMWARE_VER_LEVEL       2
 
+#define PATH_BLACKLIST_FILE  "/path_bl"
+#define CHAN_BLACKLIST_FILE   "/chan_bl"
+
 #define REQ_TYPE_GET_STATUS         0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE         0x02
 #define REQ_TYPE_GET_TELEMETRY_DATA 0x03
@@ -556,6 +559,213 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
   return getRNG()->nextInt(0, 5*t + 1);
 }
 
+/* ----------------------- Blacklist helpers -------------------------------- */
+
+bool MyMesh::isChanBlacklisted(const mesh::Packet* packet) const {
+  uint8_t pt = packet->getPayloadType();
+  if (pt != PAYLOAD_TYPE_GRP_TXT && pt != PAYLOAD_TYPE_GRP_DATA) return false;
+  if (packet->payload_len < PATH_HASH_SIZE) return false;
+
+  return blacklistChanHashMatches(packet->payload[0], _chan_blacklist, MAX_BLACKLIST_ENTRIES)
+      || blacklistChannelNameMatches(packet->payload, packet->payload_len,
+                                     _chan_name_filters, _num_chan_name_filters);
+}
+
+bool MyMesh::addToBlacklist(BlacklistEntry* list, const uint8_t* prefix, uint8_t len) {
+  if (len == 0 || len > MAX_PATH_PREFIX_LEN) return false;
+  // if already present, consider success
+  for (int i = 0; i < MAX_BLACKLIST_ENTRIES; i++) {
+    if (list[i].len == len && memcmp(list[i].prefix, prefix, len) == 0) return true;
+  }
+  // find an empty slot
+  for (int i = 0; i < MAX_BLACKLIST_ENTRIES; i++) {
+    if (list[i].len == 0) {
+      list[i].len = len;
+      memcpy(list[i].prefix, prefix, len);
+      return true;
+    }
+  }
+  return false; // list is full
+}
+
+bool MyMesh::removeFromBlacklist(BlacklistEntry* list, const uint8_t* prefix, uint8_t len) {
+  for (int i = 0; i < MAX_BLACKLIST_ENTRIES; i++) {
+    if (list[i].len == len && memcmp(list[i].prefix, prefix, len) == 0) {
+      list[i].len = 0; // mark slot as empty
+      return true;
+    }
+  }
+  return false;
+}
+
+void MyMesh::formatBlacklist(const BlacklistEntry* list, char* reply) {
+  BlacklistReply r;
+  blacklistReplyInit(r, reply, BLACKLIST_REPLY_MAX);
+  for (int i = 0; i < MAX_BLACKLIST_ENTRIES; i++) {
+    if (list[i].len) blacklistReplyAddHex(r, list[i]);
+  }
+  blacklistReplyFinish(r);
+}
+
+
+// Opens a file for writing from scratch on every platform.
+File MyMesh::openForWrite(const char* fname) {
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(fname);   // FILE_O_WRITE does not truncate
+  return _fs->open(fname, FILE_O_WRITE);
+#elif defined(RP2040_PLATFORM)
+  return _fs->open(fname, "w");
+#else
+  return _fs->open(fname, "w", true);
+#endif
+}
+
+void MyMesh::loadBlacklist(const char* fname, BlacklistEntry* list) {
+  memset(list, 0, sizeof(BlacklistEntry) * MAX_BLACKLIST_ENTRIES);
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(fname, "r");
+#else
+  File f = _fs->open(fname);
+#endif
+  if (!f) return;
+  int idx = 0;
+  BlacklistLineReader<MAX_PATH_PREFIX_LEN * 2 + 1> reader;
+  while (idx < MAX_BLACKLIST_ENTRIES) {
+    int c = f.available() ? f.read() : -1;
+    if (reader.feed(c) && blacklistParseHex(reader.line, list[idx])) idx++;
+    if (c < 0) break;
+  }
+  f.close();
+}
+
+bool MyMesh::saveBlacklist(const char* fname, const BlacklistEntry* list) {
+  File f = openForWrite(fname);
+  if (!f) return false;
+  bool ok = true;
+  for (int i = 0; i < MAX_BLACKLIST_ENTRIES; i++) {
+    if (list[i].len == 0) continue;
+    char hex[MAX_PATH_PREFIX_LEN * 2 + 2];
+    mesh::Utils::toHex(hex, list[i].prefix, list[i].len);
+    ok = (f.print(hex) == strlen(hex) && f.print('\n') == 1) && ok;
+  }
+  f.close();
+  return ok;
+}
+
+/* ------------------- Channel name filter helpers -------------------------- */
+
+bool MyMesh::addChanNameFilter(const char* name) {
+  // Check for duplicate
+  for (int i = 0; i < _num_chan_name_filters; i++) {
+    if (strcmp(_chan_name_filters[i].name, name) == 0) return true; // already exists
+  }
+  if (strlen(name) < 2 || strlen(name) >= sizeof(_chan_name_filters[0].name)) return false; // would be truncated on save
+  if (_num_chan_name_filters >= MAX_CHAN_NAME_FILTERS) return false; // full
+  if (!blacklistDeriveNameFilter(_chan_name_filters[_num_chan_name_filters], name)) return false;
+  _num_chan_name_filters++;
+  return true;
+}
+
+bool MyMesh::removeChanNameFilter(const char* name) {
+  for (int i = 0; i < _num_chan_name_filters; i++) {
+    if (strcmp(_chan_name_filters[i].name, name) == 0) {
+      // shift remaining entries down
+      for (int j = i; j < _num_chan_name_filters - 1; j++) {
+        _chan_name_filters[j] = _chan_name_filters[j + 1];
+      }
+      _num_chan_name_filters--;
+      memset(&_chan_name_filters[_num_chan_name_filters], 0, sizeof(ChanNameFilter));
+      return true;
+    }
+  }
+  return false;
+}
+
+void MyMesh::loadChanBlacklist(const char* fname) {
+  // One pass: "#name" lines are channel names (checked by decryption), the rest 1-byte hashes.
+  memset(_chan_blacklist, 0, sizeof(_chan_blacklist));
+  memset(_chan_name_filters, 0, sizeof(_chan_name_filters));
+  _num_chan_name_filters = 0;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(fname, "r");
+#else
+  File f = _fs->open(fname);
+#endif
+  if (!f) return;
+  auto on_name = [this](const char* name) {
+    if (blacklistDeriveNameFilter(_chan_name_filters[_num_chan_name_filters], name)) _num_chan_name_filters++;
+  };
+  BlacklistChanLoader<sizeof(ChanNameFilter::name) + 1, decltype(on_name)>
+      loader(_chan_blacklist, MAX_BLACKLIST_ENTRIES, MAX_CHAN_NAME_FILTERS, on_name);
+  while (true) {
+    int c = f.available() ? f.read() : -1;
+    loader.feed(c);
+    if (c < 0) break;
+  }
+  f.close();
+}
+
+bool MyMesh::saveChanBlacklist(const char* fname) {
+  File f = openForWrite(fname);
+  if (!f) return false;
+  bool ok = true;
+  // Write hex prefix entries
+  for (int i = 0; i < MAX_BLACKLIST_ENTRIES; i++) {
+    if (_chan_blacklist[i].len == 0) continue;
+    char hex[MAX_PATH_PREFIX_LEN * 2 + 2];
+    mesh::Utils::toHex(hex, _chan_blacklist[i].prefix, _chan_blacklist[i].len);
+    ok = (f.print(hex) == strlen(hex) && f.print('\n') == 1) && ok;
+  }
+  // Write #channel_name entries
+  for (int i = 0; i < _num_chan_name_filters; i++) {
+    const char* name = _chan_name_filters[i].name;
+    ok = (f.print(name) == strlen(name) && f.print('\n') == 1) && ok;
+  }
+  f.close();
+  return ok;
+}
+
+void MyMesh::formatChanBlacklist(char* reply) {
+  // bounded by the real reply buffers, not by MAX_PACKET_PAYLOAD
+  BlacklistReply r;
+  blacklistReplyInit(r, reply, BLACKLIST_REPLY_MAX);
+  for (int i = 0; i < MAX_BLACKLIST_ENTRIES; i++) {
+    if (_chan_blacklist[i].len) blacklistReplyAddHex(r, _chan_blacklist[i]);
+  }
+  for (int i = 0; i < _num_chan_name_filters; i++) {
+    blacklistReplyAdd(r, _chan_name_filters[i].name);
+  }
+  blacklistReplyFinish(r);
+}
+
+// Blacklist filter: called by Mesh::onRecvPacket() for flood packets only
+bool MyMesh::filterRecvFloodPacket(mesh::Packet* pkt) {
+  // Drop packets whose path contains a blacklisted node prefix
+  int idx = blacklistPathMatchIndex(pkt->path, pkt->getPathHashSize(), pkt->getPathHashCount(),
+                                    _path_blacklist, MAX_BLACKLIST_ENTRIES);
+  if (idx >= 0) {
+    MESH_DEBUG_PRINTLN("filterRecvFloodPacket: path prefix blacklisted, dropping!");
+    return true;
+  }
+  // The originator is not in the path (only forwarders append their hash),
+  // so also match adverts by the advertiser's public key prefix
+  if (pkt->getPayloadType() == PAYLOAD_TYPE_ADVERT && pkt->payload_len >= PUB_KEY_SIZE) {
+    idx = blacklistKeyMatchIndex(pkt->payload, PUB_KEY_SIZE, _path_blacklist, MAX_BLACKLIST_ENTRIES);
+    if (idx >= 0) {
+      MESH_DEBUG_PRINTLN("filterRecvFloodPacket: advert sender blacklisted, dropping!");
+      return true;
+    }
+  }
+
+  // Drop group-channel packets whose channel is blacklisted
+  if (isChanBlacklisted(pkt)) {
+    MESH_DEBUG_PRINTLN("filterRecvFloodPacket: channel blacklisted, dropping!");
+    return true;
+  }
+  return false;
+}
+
+
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
   if (pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD) {
     recv_pkt_region = region_map.findMatch(pkt, REGION_DENY_FLOOD);
@@ -896,6 +1106,11 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   region_load_active = false;
   recv_pkt_region = NULL;
 
+  memset(_path_blacklist, 0, sizeof(_path_blacklist));
+  memset(_chan_blacklist,  0, sizeof(_chan_blacklist));
+  memset(_chan_name_filters, 0, sizeof(_chan_name_filters));
+  _num_chan_name_filters = 0;
+
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
 #endif
@@ -1072,6 +1287,8 @@ void MyMesh::begin(FILESYSTEM *fs) {
   acl.load(_fs, self_id);
   // TODO: key_store.begin();
   region_map.load(_fs);
+  loadBlacklist(PATH_BLACKLIST_FILE, _path_blacklist);
+  loadChanBlacklist(CHAN_BLACKLIST_FILE);
 
   // establish default-scope
   {
@@ -1405,10 +1622,102 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       sendNodeDiscoverReq();
       strcpy(reply, "OK - Discover sent");
     }
+  } else if (memcmp(command, "blacklist ", 10) == 0) {
+    // Commands:
+    //   blacklist path list
+    //   blacklist path add <hex>[,<hex>,...]   (1-4 bytes per entry)
+    //   blacklist path rem <hex>[,<hex>,...]
+    //   blacklist path clear
+    //   blacklist chan list
+    //   blacklist chan add <hex|#name>[,<hex|#name>,...]
+    //   blacklist chan rem <hex|#name>[,<hex|#name>,...]
+    //   blacklist chan clear
+    const char* parts[5];
+    int n = mesh::Utils::parseTextParts(command, parts, 5, ' ');
+
+    BlacklistEntry* list = NULL;
+    const char* list_file = NULL;
+    bool is_chan = false;
+    if (n >= 2 && strcmp(parts[1], "path") == 0) {
+      list = _path_blacklist;  list_file = PATH_BLACKLIST_FILE;
+    } else if (n >= 2 && strcmp(parts[1], "chan") == 0) {
+      list = _chan_blacklist;  list_file = CHAN_BLACKLIST_FILE;
+      is_chan = true;
+    }
+
+    if (list && n == 3 && strcmp(parts[2], "list") == 0) {
+      if (is_chan) {
+        formatChanBlacklist(reply);
+      } else {
+        formatBlacklist(list, reply);
+      }
+    } else if (list && n == 3 && strcmp(parts[2], "clear") == 0) {
+      memset(list, 0, sizeof(BlacklistEntry) * MAX_BLACKLIST_ENTRIES);
+      if (is_chan) {
+        _num_chan_name_filters = 0;
+        memset(_chan_name_filters, 0, sizeof(_chan_name_filters));
+      }
+      bool saved = is_chan ? saveChanBlacklist(list_file) : saveBlacklist(list_file, list);
+      strcpy(reply, saved ? "OK" : "Err - storage write failed, changes are not saved");
+    } else if (list && n == 4 && (strcmp(parts[2], "add") == 0 || strcmp(parts[2], "rem") == 0)) {
+      bool is_add = (parts[2][0] == 'a');
+      // parts[3] may be a comma-separated list of hex entries or #channel_name entries
+      char tokens[160];
+      if (strlen(parts[3]) >= sizeof(tokens)) {   // never cut a #name in half
+        strcpy(reply, "Err - list too long, split it");
+        return;
+      }
+      strcpy(tokens, parts[3]);
+
+      const char* tok_parts[MAX_BLACKLIST_ENTRIES];
+      int tok_n = blacklistSplitTokens(tokens, tok_parts, MAX_BLACKLIST_ENTRIES);
+      if (tok_n < 1) {
+        strcpy(reply, "Err - empty entry or too many entries");
+        return;
+      }
+
+      bool any_ok = false, any_err = false, adverts_only = false;
+      for (int t = 0; t < tok_n; t++) {
+        if (is_chan && tok_parts[t][0] == '#') {
+          // #channel_name entry
+          bool ok = is_add ? addChanNameFilter(tok_parts[t])
+                           : removeChanNameFilter(tok_parts[t]);
+          if (ok) any_ok = true; else any_err = true;
+        } else {
+          BlacklistEntry e;
+          if (!blacklistParseHex(tok_parts[t], e)) {
+            any_err = true; continue;
+          }
+          // packets carry only a 1-byte channel hash ('rem' still accepts older, longer entries)
+          if (is_chan && is_add && e.len != PATH_HASH_SIZE) {
+            any_err = true; continue;
+          }
+          // path hashes are 1..3 bytes: a 4-byte entry can only match the advertiser's key
+          if (!is_chan && is_add && e.len > MAX_PATH_HASH_LEN) adverts_only = true;
+          bool ok = is_add ? addToBlacklist(list, e.prefix, e.len)
+                           : removeFromBlacklist(list, e.prefix, e.len);
+          if (ok) any_ok = true; else any_err = true;
+        }
+      }
+
+      // auto-save on any successful mutation
+      if (any_ok) {
+        bool saved = is_chan ? saveChanBlacklist(list_file) : saveBlacklist(list_file, list);
+        if (!saved) {
+          strcpy(reply, "Err - storage write failed, changes are not saved");
+          return;
+        }
+      }
+
+      blacklistFormatResult(any_ok, any_err, is_add, adverts_only, reply);
+    } else {
+      strcpy(reply, "Err - usage: blacklist <path|chan> <list|add|rem|clear> [hex|#name[,...]]");
+    }
+  } else if (strcmp(command, "help blacklist") == 0) {
+    // Keep the full syntax separate from the role and common command lists.
+    strcpy(reply, "blacklist path|chan list|add|rem|clear [hex|#name,...]");
   } else if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
-    strcpy(reply, "setperm, get acl, discover.neighbors");
-    // The role's commands and the common list do not fit one reply packet
-    // together: the common list comes on its own, with any `help <word>`.
+    strcpy(reply, "setperm, get acl, discover.neighbors, help blacklist");
     strcat(reply, "\nmore: help all");
   } else{
     _cli.handleCommand(sender_timestamp, command, reply);  // common CLI commands
